@@ -5,8 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -32,38 +30,6 @@ func Open(dsn string) (*sql.DB, error) {
 	db.SetMaxIdleConns(5)
 	db.SetMaxOpenConns(10)
 	return db, nil
-}
-
-func Init(db *sql.DB) error {
-	// Initialize schema and ensure the error column exists for older tables.
-	_, err := db.Exec(`
-		CREATE TABLE IF NOT EXISTS jobs (
-			id CHAR(36) PRIMARY KEY,
-			status VARCHAR(32) NOT NULL,
-			payload JSON NOT NULL,
-			result JSON,
-			error TEXT,
-			created_at VARCHAR(32) NOT NULL,
-			updated_at VARCHAR(32) NOT NULL
-		);
-	`)
-	if err != nil {
-		return err
-	}
-	_, _ = db.Exec(`ALTER TABLE jobs ADD COLUMN error TEXT`)
-	var columnType string
-	if err := db.QueryRow(`
-		SELECT COLUMN_TYPE
-		FROM information_schema.columns
-		WHERE table_schema = DATABASE() AND table_name = 'jobs' AND column_name = 'id'`,
-	).Scan(&columnType); err != nil {
-		return err
-	}
-	columnType = strings.ToLower(columnType)
-	if !strings.HasPrefix(columnType, "char(36)") && !strings.HasPrefix(columnType, "varchar(36)") {
-		return fmt.Errorf("jobs.id must be CHAR(36) or VARCHAR(36) for UUIDs; migrate existing table")
-	}
-	return nil
 }
 
 func NowISO() string {

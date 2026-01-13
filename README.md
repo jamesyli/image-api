@@ -58,3 +58,22 @@ curl -X POST http://127.0.0.1:8000/jobs/image-crop \
 ## OpenAPI
 - Spec: `openapi.yaml`
 - Regenerate server types (requires `oapi-codegen` in PATH): `go generate ./internal/api`
+
+## Cloud Run deployment
+GitHub Actions can deploy two services (API + worker) on every push to `main`.
+Set these secrets in your repo:
+- `GCP_WORKLOAD_IDENTITY_PROVIDER`
+- `GCP_SERVICE_ACCOUNT`
+- `GCP_PROJECT_ID`
+- `GCP_REGION`
+- `GCP_AR_REPO`
+- `CLOUDSQL_INSTANCE`
+- `JOB_DB_DSN`
+
+## Migrations
+Run migrations locally and in production before starting services:
+```bash
+JOB_DB_DSN='user:pass@unix(/cloudsql/PROJECT_ID:REGION:INSTANCE)/image_api?parseTime=true' \\
+  go run ./cmd/migrate
+```
+Migration files live in `migrations/`.

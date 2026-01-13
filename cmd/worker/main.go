@@ -32,10 +32,6 @@ func main() {
 	}
 	defer db.Close()
 
-	if err := jobdb.Init(db); err != nil {
-		log.Fatal(err)
-	}
-
 	ctx := context.Background()
 	for {
 		job, ok, err := jobdb.ClaimJob(ctx, db)

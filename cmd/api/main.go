@@ -28,10 +28,6 @@ func main() {
 	}
 	defer db.Close()
 
-	if err := jobdb.Init(db); err != nil {
-		log.Fatal(err)
-	}
-
 	router := chi.NewRouter()
 	api.HandlerFromMux(&server{db: db}, router)
 
