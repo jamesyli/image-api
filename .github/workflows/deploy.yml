@@ -1,0 +1,65 @@
+name: deploy
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Auth to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ secrets.GCP_REGION }}-docker.pkg.dev --quiet
+
+      - name: Build and push API image
+        run: |
+          IMAGE="${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ secrets.GCP_AR_REPO }}/image-api:${{ github.sha }}"
+          docker build -f Dockerfile.api -t "$IMAGE" .
+          docker push "$IMAGE"
+          echo "API_IMAGE=$IMAGE" >> $GITHUB_ENV
+
+      - name: Build and push worker image
+        run: |
+          IMAGE="${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ secrets.GCP_AR_REPO }}/image-worker:${{ github.sha }}"
+          docker build -f Dockerfile.worker -t "$IMAGE" .
+          docker push "$IMAGE"
+          echo "WORKER_IMAGE=$IMAGE" >> $GITHUB_ENV
+
+      - name: Deploy API service
+        run: |
+          gcloud run deploy image-api \
+            --image "$API_IMAGE" \
+            --region "${{ secrets.GCP_REGION }}" \
+            --platform managed \
+            --allow-unauthenticated \
+            --set-env-vars JOB_DB_DSN='${{ secrets.JOB_DB_DSN }}' \
+            --add-cloudsql-instances "${{ secrets.CLOUDSQL_INSTANCE }}"
+
+      - name: Deploy worker service
+        run: |
+          gcloud run deploy image-worker \
+            --image "$WORKER_IMAGE" \
+            --region "${{ secrets.GCP_REGION }}" \
+            --platform managed \
+            --no-allow-unauthenticated \
+            --set-env-vars JOB_DB_DSN='${{ secrets.JOB_DB_DSN }}' \
+            --add-cloudsql-instances "${{ secrets.CLOUDSQL_INSTANCE }}"
