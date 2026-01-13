@@ -22,10 +22,25 @@ services:
     depends_on:
       mysql:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
 
   worker:
     build: .
     command: ["/app/worker"]
+    environment:
+      JOB_DB_DSN: root:pass@tcp(mysql:3306)/image_api?parseTime=true
+    depends_on:
+      mysql:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile.migrate
+    command: ["/app/migrate"]
     environment:
       JOB_DB_DSN: root:pass@tcp(mysql:3306)/image_api?parseTime=true
     depends_on:

@@ -69,3 +69,11 @@ Set these secrets in your repo:
 - `GCP_AR_REPO`
 - `CLOUDSQL_INSTANCE`
 - `JOB_DB_DSN`
+
+## Migrations
+Run migrations locally and in production before starting services:
+```bash
+JOB_DB_DSN='user:pass@unix(/cloudsql/PROJECT_ID:REGION:INSTANCE)/image_api?parseTime=true' \\
+  go run ./cmd/migrate
+```
+Migration files live in `migrations/`.
