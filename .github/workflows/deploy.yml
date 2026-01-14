@@ -87,6 +87,8 @@ jobs:
             --concurrency 1 \
             --min-instances 0 \
             --max-instances 5 \
+            --liveness-probe=httpGet.path=/healthz,httpGet.port=8080 \
+            --startup-probe=httpGet.path=/readyz,httpGet.port=8080 \
             --service-account "${{ secrets.RUNTIME_SERVICE_ACCOUNT }}" \
             --set-env-vars JOB_DB_DSN='${{ secrets.JOB_DB_DSN }}',GCS_BUCKET='${{ secrets.GCS_BUCKET }}',GCS_PUBLIC_SKIP_ACL_ERRORS=true \
             --set-cloudsql-instances "${{ secrets.CLOUDSQL_INSTANCE }}"
@@ -101,6 +103,8 @@ jobs:
             --concurrency 1 \
             --min-instances 1 \
             --max-instances 1 \
+            --liveness-probe=httpGet.path=/healthz,httpGet.port=8080 \
+            --startup-probe=httpGet.path=/readyz,httpGet.port=8080 \
             --service-account "${{ secrets.RUNTIME_SERVICE_ACCOUNT }}" \
             --set-env-vars JOB_DB_DSN='${{ secrets.JOB_DB_DSN }}',GCP_PROJECT_ID='${{ secrets.GCP_PROJECT_ID }}',PUBSUB_TOPIC=${PUBSUB_TOPIC} \
             --set-cloudsql-instances "${{ secrets.CLOUDSQL_INSTANCE }}"
@@ -138,6 +142,8 @@ jobs:
             --concurrency 80 \
             --min-instances 0 \
             --max-instances 10 \
+            --liveness-probe=httpGet.path=/healthz,httpGet.port=8080 \
+            --startup-probe=httpGet.path=/readyz,httpGet.port=8080 \
             --service-account "${{ secrets.RUNTIME_SERVICE_ACCOUNT }}" \
             --set-env-vars JOB_DB_DSN='${{ secrets.JOB_DB_DSN }}',GCP_PROJECT_ID='${{ secrets.GCP_PROJECT_ID }}',PUBSUB_TOPIC=${PUBSUB_TOPIC} \
             --set-cloudsql-instances "${{ secrets.CLOUDSQL_INSTANCE }}"

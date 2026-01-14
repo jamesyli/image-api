@@ -69,6 +69,19 @@ func main() {
 	}
 
 	router := chi.NewRouter()
+	router.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+	router.Get("/readyz", func(w http.ResponseWriter, r *http.Request) {
+		if err := checkAPIReady(r.Context(), db, publisher); err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte("not ready"))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
 	specPath := os.Getenv("OPENAPI_SPEC_PATH")
 	if specPath == "" {
 		specPath = "openapi.yaml"
@@ -260,6 +273,16 @@ func mustParseUUID(id string) uuid.UUID {
 func hashBody(body []byte) string {
 	sum := sha256.Sum256(body)
 	return hex.EncodeToString(sum[:])
+}
+
+func checkAPIReady(ctx context.Context, db *sql.DB, topic *pubsub.Topic) error {
+	checkCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	if err := db.PingContext(checkCtx); err != nil {
+		return err
+	}
+	_, err := topic.Exists(checkCtx)
+	return err
 }
 
 func fatal(msg string, attrs ...any) {
