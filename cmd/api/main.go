@@ -2,9 +2,13 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
-	"log"
+	"errors"
+	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"time"
@@ -24,17 +28,19 @@ import (
 )
 
 func main() {
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, nil)))
+
 	dbDSN := os.Getenv("JOB_DB_DSN")
 	if dbDSN == "" {
-		log.Fatal("JOB_DB_DSN is required")
+		fatal("JOB_DB_DSN is required")
 	}
 	projectID := os.Getenv("GCP_PROJECT_ID")
 	if projectID == "" {
-		log.Fatal("GCP_PROJECT_ID is required")
+		fatal("GCP_PROJECT_ID is required")
 	}
 	topicName := os.Getenv("PUBSUB_TOPIC")
 	if topicName == "" {
-		log.Fatal("PUBSUB_TOPIC is required")
+		fatal("PUBSUB_TOPIC is required")
 	}
 	pubsubMode := os.Getenv("PUBSUB_MODE")
 	if pubsubMode == "" {
@@ -43,13 +49,13 @@ func main() {
 
 	db, err := jobdb.Open(dbDSN)
 	if err != nil {
-		log.Fatal(err)
+		fatal("failed to open job db", "err", err)
 	}
 	defer db.Close()
 
 	pubsubClient, err := pubsub.NewClient(context.Background(), projectID)
 	if err != nil {
-		log.Fatal(err)
+		fatal("failed to create pubsub client", "err", err)
 	}
 	defer pubsubClient.Close()
 
@@ -58,7 +64,7 @@ func main() {
 
 	if pubsubMode == "emulator" {
 		if err := ensureTopicWithRetry(context.Background(), pubsubClient, topicName, 10, 500*time.Millisecond); err != nil {
-			log.Fatal(err)
+			fatal("failed to ensure pubsub topic", "err", err)
 		}
 	}
 
@@ -69,10 +75,10 @@ func main() {
 	}
 	swagger, err := loadOpenAPISpec(specPath)
 	if err != nil {
-		log.Fatal(err)
+		fatal("failed to load openapi spec", "err", err)
 	}
 	if err := swagger.Validate(context.Background()); err != nil {
-		log.Fatal(err)
+		fatal("invalid openapi spec", "err", err)
 	}
 	router.Use(middleware.OapiRequestValidator(swagger))
 	api.HandlerFromMux(&server{db: db, publisher: publisher}, router)
@@ -82,8 +88,10 @@ func main() {
 		port = "8080"
 	}
 	addr := ":" + port
-	log.Printf("api listening on %s", addr)
-	log.Fatal(http.ListenAndServe(addr, router))
+	slog.Info("api listening", "addr", addr)
+	if err := http.ListenAndServe(addr, router); err != nil {
+		fatal("api server failed", "err", err)
+	}
 }
 
 type server struct {
@@ -94,7 +102,12 @@ type server struct {
 func (s *server) PostJobsImageCrop(w http.ResponseWriter, r *http.Request) {
 	// Validate and enqueue an image-crop job payload.
 	var req api.ImageCropRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
@@ -113,6 +126,41 @@ func (s *server) PostJobsImageCrop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	idemKey := r.Header.Get("Idempotency-Key")
+	if idemKey != "" {
+		// Reuse the existing job when the same key+payload is retried.
+		hash := hashBody(body)
+		job, outbox, reused, err := jobdb.InsertJobWithOutboxAndIdempotency(s.db, payload, idemKey, hash)
+		if err != nil {
+			if errors.Is(err, jobdb.ErrIdempotencyKeyConflict) {
+				writeError(w, http.StatusConflict, "idempotency key reused with different payload")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "failed to create job")
+			return
+		}
+		if !reused {
+			// Only publish to Pub/Sub for newly created jobs.
+			if err := s.publishJob(r.Context(), outbox.ID, outbox.Payload); err != nil {
+				slog.Error("publish failed for job", "job_id", job.ID, "err", err)
+			}
+		}
+		status := http.StatusCreated
+		if reused {
+			// Same idempotency key and payload: return the existing job instead of creating a new one.
+			status = http.StatusOK
+		}
+		writeJSON(w, api.JobResponse{
+			Id:              mustParseUUID(job.ID),
+			Status:          job.Status,
+			CroppedImageUrl: nil,
+			Error:           nil,
+			CreatedAt:       job.CreatedAt,
+			UpdatedAt:       job.UpdatedAt,
+		}, status)
+		return
+	}
+
 	job, outbox, err := jobdb.InsertJobWithOutbox(s.db, payload)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create job")
@@ -120,7 +168,7 @@ func (s *server) PostJobsImageCrop(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.publishJob(r.Context(), outbox.ID, outbox.Payload); err != nil {
-		log.Printf("publish failed for job %s: %v", job.ID, err)
+		slog.Error("publish failed for job", "job_id", job.ID, "err", err)
 	}
 
 	writeJSON(w, api.JobResponse{
@@ -207,6 +255,16 @@ func mustParseUUID(id string) uuid.UUID {
 		return uuid.Nil
 	}
 	return parsed
+}
+
+func hashBody(body []byte) string {
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:])
+}
+
+func fatal(msg string, attrs ...any) {
+	slog.Error(msg, attrs...)
+	os.Exit(1)
 }
 
 func (s *server) publishJob(ctx context.Context, outboxID string, payload json.RawMessage) error {

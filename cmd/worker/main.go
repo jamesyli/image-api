@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"strconv"
@@ -25,14 +25,16 @@ import (
 )
 
 func main() {
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, nil)))
+
 	dbDSN := os.Getenv("JOB_DB_DSN")
 	if dbDSN == "" {
-		log.Fatal("JOB_DB_DSN is required")
+		fatal("JOB_DB_DSN is required")
 	}
 
 	db, err := jobdb.Open(dbDSN)
 	if err != nil {
-		log.Fatal(err)
+		fatal("failed to open job db", "err", err)
 	}
 	defer db.Close()
 
@@ -62,11 +64,11 @@ func main() {
 	} else {
 		bucket := os.Getenv("GCS_BUCKET")
 		if bucket == "" {
-			log.Fatal("GCS_BUCKET is required")
+			fatal("GCS_BUCKET is required")
 		}
 		storageClient, err := storage.NewClient(context.Background())
 		if err != nil {
-			log.Fatal(err)
+			fatal("failed to create storage client", "err", err)
 		}
 		defer storageClient.Close()
 		uploader = gcs.NewUploader(storageClient, bucket, makePublic, allowACLFailure)
@@ -97,7 +99,7 @@ func main() {
 			http.Error(w, "invalid message", http.StatusBadRequest)
 			return
 		}
-		log.Printf("received job message: %s", jobID)
+		slog.Info("received job message", "job_id", jobID)
 
 		claimed, err := jobdb.StartJob(db, jobID)
 		if err != nil {
@@ -105,7 +107,7 @@ func main() {
 			return
 		}
 		if !claimed {
-			log.Printf("job already claimed: %s", jobID)
+			slog.Info("job already claimed", "job_id", jobID)
 			w.WriteHeader(http.StatusOK)
 			return
 		}
@@ -123,14 +125,14 @@ func main() {
 		result, err := processor.Process(r.Context(), job.ID, job.Payload)
 		if err != nil {
 			if err := jobdb.FailJob(db, job.ID, err.Error()); err != nil {
-				log.Printf("failed to mark job %s failed: %v", job.ID, err)
+				slog.Error("failed to mark job failed", "job_id", job.ID, "err", err)
 			}
 			http.Error(w, "job failed", http.StatusInternalServerError)
 			return
 		}
 
 		if err := jobdb.CompleteJob(db, job.ID, result); err != nil {
-			log.Printf("failed to mark job %s done: %v", job.ID, err)
+			slog.Error("failed to mark job done", "job_id", job.ID, "err", err)
 			http.Error(w, "job completion failed", http.StatusInternalServerError)
 			return
 		}
@@ -147,8 +149,10 @@ func main() {
 	if port == "" {
 		port = "8080"
 	}
-	log.Printf("worker listening on :%s", port)
-	log.Fatal(http.ListenAndServe(":"+port, mux))
+	slog.Info("worker listening", "addr", ":"+port)
+	if err := http.ListenAndServe(":"+port, mux); err != nil {
+		fatal("worker server failed", "err", err)
+	}
 }
 
 type jobProcessor struct {
@@ -241,6 +245,11 @@ func decodeJobID(envelope pubSubEnvelope) (string, error) {
 }
 
 var errMissingJobID = errors.New("jobId is required")
+
+func fatal(msg string, attrs ...any) {
+	slog.Error(msg, attrs...)
+	os.Exit(1)
+}
 
 func envInt64(key string, fallback int64) int64 {
 	if raw := os.Getenv(key); raw != "" {

@@ -7,6 +7,12 @@ paths:
     post:
       summary: Create an image-crop job
       operationId: postJobsImageCrop
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          required: false
+          schema:
+            type: string
       requestBody:
         required: true
         content:
