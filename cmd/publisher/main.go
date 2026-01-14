@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"strconv"
@@ -18,17 +18,19 @@ import (
 )
 
 func main() {
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, nil)))
+
 	dbDSN := os.Getenv("JOB_DB_DSN")
 	if dbDSN == "" {
-		log.Fatal("JOB_DB_DSN is required")
+		fatal("JOB_DB_DSN is required")
 	}
 	projectID := os.Getenv("GCP_PROJECT_ID")
 	if projectID == "" {
-		log.Fatal("GCP_PROJECT_ID is required")
+		fatal("GCP_PROJECT_ID is required")
 	}
 	topicName := os.Getenv("PUBSUB_TOPIC")
 	if topicName == "" {
-		log.Fatal("PUBSUB_TOPIC is required")
+		fatal("PUBSUB_TOPIC is required")
 	}
 	pubsubMode := os.Getenv("PUBSUB_MODE")
 	if pubsubMode == "" {
@@ -58,13 +60,13 @@ func main() {
 
 	db, err := jobdb.Open(dbDSN)
 	if err != nil {
-		log.Fatal(err)
+		fatal("failed to open job db", "err", err)
 	}
 	defer db.Close()
 
 	pubsubClient, err := pubsub.NewClient(context.Background(), projectID)
 	if err != nil {
-		log.Fatal(err)
+		fatal("failed to create pubsub client", "err", err)
 	}
 	defer pubsubClient.Close()
 
@@ -73,10 +75,10 @@ func main() {
 
 	if pubsubMode == "emulator" {
 		if err := ensureTopicWithRetry(context.Background(), pubsubClient, topicName, 10, 500*time.Millisecond); err != nil {
-			log.Fatal(err)
+			fatal("failed to ensure pubsub topic", "err", err)
 		}
 		if err := ensureSubscription(context.Background(), pubsubClient, topicName, subscriptionName, pushEndpoint); err != nil {
-			log.Fatal(err)
+			fatal("failed to ensure pubsub subscription", "err", err)
 		}
 	}
 
@@ -93,8 +95,10 @@ func main() {
 	if port == "" {
 		port = "8080"
 	}
-	log.Printf("publisher listening on :%s", port)
-	log.Fatal(http.ListenAndServe(":"+port, mux))
+	slog.Info("publisher listening", "addr", ":"+port)
+	if err := http.ListenAndServe(":"+port, mux); err != nil {
+		fatal("publisher server failed", "err", err)
+	}
 }
 
 func ensureTopic(ctx context.Context, client *pubsub.Client, topicName string) error {
@@ -153,7 +157,7 @@ func runPublisherLoop(ctx context.Context, db *sql.DB, publisher *pubsub.Topic, 
 	for {
 		messages, err := jobdb.ClaimOutboxBatch(ctx, db, batchSize)
 		if err != nil {
-			log.Printf("outbox claim failed: %v", err)
+			slog.Error("outbox claim failed", "err", err)
 			time.Sleep(pollInterval)
 			continue
 		}
@@ -169,8 +173,13 @@ func runPublisherLoop(ctx context.Context, db *sql.DB, publisher *pubsub.Topic, 
 				continue
 			}
 			if err := jobdb.MarkOutboxPublished(db, msg.ID); err != nil {
-				log.Printf("mark published failed for outbox %s: %v", msg.ID, err)
+				slog.Error("mark published failed for outbox", "outbox_id", msg.ID, "err", err)
 			}
 		}
 	}
+}
+
+func fatal(msg string, attrs ...any) {
+	slog.Error(msg, attrs...)
+	os.Exit(1)
 }

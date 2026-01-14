@@ -7,6 +7,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/go-sql-driver/mysql"
 	"github.com/google/uuid"
 )
 
@@ -25,6 +26,17 @@ type OutboxMessage struct {
 	JobID   string
 	Payload json.RawMessage
 }
+
+type IdempotencyRecord struct {
+	// Stored mapping for idempotent request replay.
+	Key         string
+	RequestHash string
+	JobID       string
+	CreatedAt   string
+}
+
+// Returned when the same idempotency key is reused with a different payload.
+var ErrIdempotencyKeyConflict = errors.New("idempotency key reused with different payload")
 
 func Open(dsn string) (*sql.DB, error) {
 	// Open a MySQL connection pool for job storage.
@@ -113,6 +125,112 @@ func InsertJobWithOutbox(db *sql.DB, payload json.RawMessage) (Job, OutboxMessag
 	}
 
 	return job, OutboxMessage{ID: outboxID, JobID: jobID, Payload: outboxPayload}, nil
+}
+
+func InsertJobWithOutboxAndIdempotency(db *sql.DB, payload json.RawMessage, idemKey string, requestHash string) (Job, OutboxMessage, bool, error) {
+	// Create a new job and outbox message, recording the idempotency key.
+	// If the key already exists, return the existing job when the payload hash matches.
+	createdAt := NowISO()
+	jobID := uuid.NewString()
+	outboxID := uuid.NewString()
+	outboxPayload, err := json.Marshal(map[string]string{"jobId": jobID})
+	if err != nil {
+		return Job{}, OutboxMessage{}, false, err
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return Job{}, OutboxMessage{}, false, err
+	}
+
+	if _, err := tx.Exec(
+		`INSERT INTO idempotency_keys (idempotency_key, request_hash, job_id, created_at)
+			 VALUES (?, ?, ?, ?)`,
+		idemKey, requestHash, jobID, createdAt,
+	); err != nil {
+		_ = tx.Rollback()
+		if isDuplicateKeyError(err) {
+			// Key already exists: reuse the existing job if the payload hash matches.
+			record, lookupErr := GetIdempotencyRecord(db, idemKey)
+			if lookupErr != nil {
+				// Failed to load the existing key mapping.
+				return Job{}, OutboxMessage{}, false, lookupErr
+			}
+			if record.RequestHash != requestHash {
+				// Same key but different payload hash is a conflict.
+				return Job{}, OutboxMessage{}, false, ErrIdempotencyKeyConflict
+			}
+			job, ok, lookupErr := GetJob(db, record.JobID)
+			if lookupErr != nil {
+				// Existing key points at a job we cannot load.
+				return Job{}, OutboxMessage{}, false, lookupErr
+			}
+			if !ok {
+				// Existing key points at a missing job, treat as error.
+				return Job{}, OutboxMessage{}, false, errors.New("idempotency key references missing job")
+			}
+			// Reuse the existing job without creating a new outbox message.
+			return job, OutboxMessage{}, true, nil
+		}
+		return Job{}, OutboxMessage{}, false, err
+	}
+
+	if _, err := tx.Exec(
+		`INSERT INTO jobs (id, status, payload, result, error, created_at, updated_at)
+		 VALUES (?, ?, ?, NULL, NULL, ?, ?)`,
+		jobID, "pending", string(payload), createdAt, createdAt,
+	); err != nil {
+		_ = tx.Rollback()
+		return Job{}, OutboxMessage{}, false, err
+	}
+
+	if _, err := tx.Exec(
+		`INSERT INTO outbox (id, job_id, payload, published_at, attempts, last_error, created_at, updated_at)
+		 VALUES (?, ?, ?, NULL, 0, NULL, ?, ?)`,
+		outboxID, jobID, string(outboxPayload), createdAt, createdAt,
+	); err != nil {
+		_ = tx.Rollback()
+		return Job{}, OutboxMessage{}, false, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return Job{}, OutboxMessage{}, false, err
+	}
+
+	job := Job{
+		ID:        jobID,
+		Status:    "pending",
+		Payload:   payload,
+		Result:    nil,
+		Error:     sql.NullString{},
+		CreatedAt: createdAt,
+		UpdatedAt: createdAt,
+	}
+
+	return job, OutboxMessage{ID: outboxID, JobID: jobID, Payload: outboxPayload}, false, nil
+}
+
+func GetIdempotencyRecord(db *sql.DB, idemKey string) (IdempotencyRecord, error) {
+	// Read the stored idempotency mapping for a key.
+	var record IdempotencyRecord
+	row := db.QueryRow(
+		`SELECT idempotency_key, request_hash, job_id, created_at
+		 FROM idempotency_keys WHERE idempotency_key = ?`,
+		idemKey,
+	)
+	if err := row.Scan(&record.Key, &record.RequestHash, &record.JobID, &record.CreatedAt); err != nil {
+		return IdempotencyRecord{}, err
+	}
+	return record, nil
+}
+
+func isDuplicateKeyError(err error) bool {
+	// MySQL duplicate key error for idempotency key reuse detection.
+	var mysqlErr *mysql.MySQLError
+	if !errors.As(err, &mysqlErr) {
+		return false
+	}
+	return mysqlErr.Number == 1062
 }
 
 func GetJob(db *sql.DB, jobID string) (Job, bool, error) {
