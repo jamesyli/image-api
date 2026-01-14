@@ -14,9 +14,9 @@ import (
 
 	"cloud.google.com/go/pubsub"
 	middleware "github.com/deepmap/oapi-codegen/pkg/chi-middleware"
+	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/go-chi/chi/v5"
 	_ "github.com/go-sql-driver/mysql"
-	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/google/uuid"
 	openapi_types "github.com/oapi-codegen/runtime/types"
 	"google.golang.org/grpc/codes"
