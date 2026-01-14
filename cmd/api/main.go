@@ -13,11 +13,11 @@ import (
 	"image-api/internal/jobdb"
 
 	"cloud.google.com/go/pubsub"
-	middleware "github.com/deepmap/oapi-codegen/pkg/chi-middleware"
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/go-chi/chi/v5"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/google/uuid"
+	middleware "github.com/oapi-codegen/chi-middleware"
 	openapi_types "github.com/oapi-codegen/runtime/types"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -57,7 +57,7 @@ func main() {
 	defer publisher.Stop()
 
 	if pubsubMode == "emulator" {
-		if err := ensureTopic(context.Background(), pubsubClient, topicName); err != nil {
+		if err := ensureTopicWithRetry(context.Background(), pubsubClient, topicName, 10, 500*time.Millisecond); err != nil {
 			log.Fatal(err)
 		}
 	}
@@ -236,4 +236,17 @@ func ensureTopic(ctx context.Context, client *pubsub.Client, topicName string) e
 		return nil
 	}
 	return err
+}
+
+func ensureTopicWithRetry(ctx context.Context, client *pubsub.Client, topicName string, attempts int, delay time.Duration) error {
+	var lastErr error
+	for i := 0; i < attempts; i++ {
+		if err := ensureTopic(ctx, client, topicName); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+		time.Sleep(delay)
+	}
+	return lastErr
 }

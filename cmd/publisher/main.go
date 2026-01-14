@@ -72,7 +72,7 @@ func main() {
 	defer publisher.Stop()
 
 	if pubsubMode == "emulator" {
-		if err := ensureTopic(context.Background(), pubsubClient, topicName); err != nil {
+		if err := ensureTopicWithRetry(context.Background(), pubsubClient, topicName, 10, 500*time.Millisecond); err != nil {
 			log.Fatal(err)
 		}
 		if err := ensureSubscription(context.Background(), pubsubClient, topicName, subscriptionName, pushEndpoint); err != nil {
@@ -111,6 +111,19 @@ func ensureTopic(ctx context.Context, client *pubsub.Client, topicName string) e
 		return nil
 	}
 	return err
+}
+
+func ensureTopicWithRetry(ctx context.Context, client *pubsub.Client, topicName string, attempts int, delay time.Duration) error {
+	var lastErr error
+	for i := 0; i < attempts; i++ {
+		if err := ensureTopic(ctx, client, topicName); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+		time.Sleep(delay)
+	}
+	return lastErr
 }
 
 func ensureSubscription(ctx context.Context, client *pubsub.Client, topicName, subName, pushEndpoint string) error {

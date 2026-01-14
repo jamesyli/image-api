@@ -73,10 +73,10 @@ components:
           minimum: 0
         width:
           type: integer
-          minimum: 1
+          minimum: 0
         height:
           type: integer
-          minimum: 1
+          minimum: 0
     JobResponse:
       type: object
       required:
