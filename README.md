@@ -21,6 +21,7 @@ export JOB_DB_DSN='user:pass@tcp(127.0.0.1:3306)/image_api?parseTime=true'
 export GCP_PROJECT_ID='your-project-id'
 export PUBSUB_TOPIC='image-jobs'
 export PUBSUB_EMULATOR_HOST='127.0.0.1:8085'
+export PORT=8080
 go run ./cmd/api
 ```
 

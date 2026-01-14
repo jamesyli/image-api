@@ -63,7 +63,11 @@ func main() {
 	router := chi.NewRouter()
 	api.HandlerFromMux(&server{db: db, publisher: publisher}, router)
 
-	addr := ":8000"
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+	addr := ":" + port
 	log.Printf("api listening on %s", addr)
 	log.Fatal(http.ListenAndServe(addr, router))
 }

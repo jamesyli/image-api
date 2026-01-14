@@ -36,7 +36,7 @@ services:
       PUBSUB_MODE: emulator
       PUBSUB_EMULATOR_HOST: pubsub:8085
     ports:
-      - "8000:8000"
+      - "8000:8080"
     depends_on:
       mysql:
         condition: service_healthy
