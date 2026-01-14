@@ -74,7 +74,7 @@ jobs:
             --region "${{ secrets.GCP_REGION }}" \
             --service-account "${{ secrets.RUNTIME_SERVICE_ACCOUNT }}" \
             --set-env-vars JOB_DB_DSN='${{ secrets.JOB_DB_DSN }}' \
-            --add-cloudsql-instances "${{ secrets.CLOUDSQL_INSTANCE }}"
+            --set-cloudsql-instances "${{ secrets.CLOUDSQL_INSTANCE }}"
           gcloud run jobs execute image-migrate --region "${{ secrets.GCP_REGION }}"
 
       - name: Deploy worker service
@@ -89,7 +89,7 @@ jobs:
             --max-instances 5 \
             --service-account "${{ secrets.RUNTIME_SERVICE_ACCOUNT }}" \
             --set-env-vars JOB_DB_DSN='${{ secrets.JOB_DB_DSN }}' \
-            --add-cloudsql-instances "${{ secrets.CLOUDSQL_INSTANCE }}"
+            --set-cloudsql-instances "${{ secrets.CLOUDSQL_INSTANCE }}"
 
       - name: Deploy publisher service
         run: |
@@ -103,7 +103,7 @@ jobs:
             --max-instances 1 \
             --service-account "${{ secrets.RUNTIME_SERVICE_ACCOUNT }}" \
             --set-env-vars JOB_DB_DSN='${{ secrets.JOB_DB_DSN }}',GCP_PROJECT_ID='${{ secrets.GCP_PROJECT_ID }}',PUBSUB_TOPIC=${PUBSUB_TOPIC} \
-            --add-cloudsql-instances "${{ secrets.CLOUDSQL_INSTANCE }}"
+            --set-cloudsql-instances "${{ secrets.CLOUDSQL_INSTANCE }}"
 
       - name: Allow Pub/Sub to invoke worker
         run: |
@@ -140,4 +140,4 @@ jobs:
             --max-instances 10 \
             --service-account "${{ secrets.RUNTIME_SERVICE_ACCOUNT }}" \
             --set-env-vars JOB_DB_DSN='${{ secrets.JOB_DB_DSN }}',GCP_PROJECT_ID='${{ secrets.GCP_PROJECT_ID }}',PUBSUB_TOPIC=${PUBSUB_TOPIC} \
-            --add-cloudsql-instances "${{ secrets.CLOUDSQL_INSTANCE }}"
+            --set-cloudsql-instances "${{ secrets.CLOUDSQL_INSTANCE }}"
