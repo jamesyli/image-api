@@ -12,6 +12,7 @@ RUN adduser -D -u 10001 app
 USER app
 WORKDIR /app
 COPY --from=builder /out/api /app/api
+COPY openapi.yaml /app/openapi.yaml
 
 EXPOSE 8000
 ENTRYPOINT ["/app/api"]

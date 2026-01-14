@@ -13,8 +13,10 @@ import (
 	"image-api/internal/jobdb"
 
 	"cloud.google.com/go/pubsub"
+	middleware "github.com/deepmap/oapi-codegen/pkg/chi-middleware"
 	"github.com/go-chi/chi/v5"
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/google/uuid"
 	openapi_types "github.com/oapi-codegen/runtime/types"
 	"google.golang.org/grpc/codes"
@@ -61,6 +63,18 @@ func main() {
 	}
 
 	router := chi.NewRouter()
+	specPath := os.Getenv("OPENAPI_SPEC_PATH")
+	if specPath == "" {
+		specPath = "openapi.yaml"
+	}
+	swagger, err := loadOpenAPISpec(specPath)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := swagger.Validate(context.Background()); err != nil {
+		log.Fatal(err)
+	}
+	router.Use(middleware.OapiRequestValidator(swagger))
 	api.HandlerFromMux(&server{db: db, publisher: publisher}, router)
 
 	port := os.Getenv("PORT")
@@ -117,6 +131,11 @@ func (s *server) PostJobsImageCrop(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:       job.CreatedAt,
 		UpdatedAt:       job.UpdatedAt,
 	}, http.StatusCreated)
+}
+
+func loadOpenAPISpec(path string) (*openapi3.T, error) {
+	loader := openapi3.NewLoader()
+	return loader.LoadFromFile(path)
 }
 
 func (s *server) GetJobsId(w http.ResponseWriter, r *http.Request, id openapi_types.UUID) {
