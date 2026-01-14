@@ -103,7 +103,7 @@ func (s *server) PostJobsImageCrop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Width <= 0 || req.Height <= 0 {
-		writeError(w, http.StatusBadRequest, "width and height must be > 0")
+		writeError(w, http.StatusBadRequest, "width and height must be greater than 0")
 		return
 	}
 

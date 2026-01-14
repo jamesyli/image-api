@@ -88,7 +88,7 @@ jobs:
             --min-instances 0 \
             --max-instances 5 \
             --service-account "${{ secrets.RUNTIME_SERVICE_ACCOUNT }}" \
-            --set-env-vars JOB_DB_DSN='${{ secrets.JOB_DB_DSN }}' \
+            --set-env-vars JOB_DB_DSN='${{ secrets.JOB_DB_DSN }}',GCS_BUCKET='${{ secrets.GCS_BUCKET }}',GCS_PUBLIC_SKIP_ACL_ERRORS=true \
             --set-cloudsql-instances "${{ secrets.CLOUDSQL_INSTANCE }}"
 
       - name: Deploy publisher service

@@ -1,16 +1,26 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
+	"image-api/internal/api"
+	"image-api/internal/gcs"
+	"image-api/internal/imageproc"
 	"image-api/internal/jobdb"
+	"image-api/internal/localstore"
+	"image-api/internal/netfetch"
+	"image-api/internal/uploader"
 
+	"cloud.google.com/go/storage"
 	_ "github.com/go-sql-driver/mysql"
 )
 
@@ -25,6 +35,49 @@ func main() {
 		log.Fatal(err)
 	}
 	defer db.Close()
+
+	backend := os.Getenv("UPLOAD_BACKEND")
+	if backend == "" {
+		backend = "gcs"
+	}
+
+	makePublic := envBool("GCS_PUBLIC", true)
+	allowACLFailure := envBool("GCS_PUBLIC_SKIP_ACL_ERRORS", false)
+	maxBytes := envInt64("IMAGE_MAX_BYTES", 10*1024*1024)
+	maxPixels := envInt("IMAGE_MAX_PIXELS", 25_000_000)
+	jpegQuality := envInt("IMAGE_JPEG_QUALITY", 90)
+
+	var uploader uploader.Uploader
+	var localDir string
+	if backend == "local" {
+		localDir = os.Getenv("LOCAL_STORAGE_DIR")
+		if localDir == "" {
+			localDir = "/tmp/image-api"
+		}
+		baseURL := os.Getenv("LOCAL_STORAGE_BASE_URL")
+		if baseURL == "" {
+			baseURL = "http://localhost:8001/files"
+		}
+		uploader = localstore.NewUploader(localDir, baseURL)
+	} else {
+		bucket := os.Getenv("GCS_BUCKET")
+		if bucket == "" {
+			log.Fatal("GCS_BUCKET is required")
+		}
+		storageClient, err := storage.NewClient(context.Background())
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer storageClient.Close()
+		uploader = gcs.NewUploader(storageClient, bucket, makePublic, allowACLFailure)
+	}
+
+	processor := newJobProcessor(
+		&http.Client{Timeout: 20 * time.Second},
+		uploader,
+		imageproc.Limits{MaxBytes: maxBytes, MaxPixels: maxPixels},
+		jpegQuality,
+	)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/pubsub/jobs", func(w http.ResponseWriter, r *http.Request) {
@@ -67,7 +120,7 @@ func main() {
 			return
 		}
 
-		result, err := processJob(job.Payload)
+		result, err := processor.Process(r.Context(), job.ID, job.Payload)
 		if err != nil {
 			if err := jobdb.FailJob(db, job.ID, err.Error()); err != nil {
 				log.Printf("failed to mark job %s failed: %v", job.ID, err)
@@ -85,6 +138,11 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 	})
 
+	if backend == "local" && localDir != "" && envBool("LOCAL_STORAGE_SERVE", true) {
+		fileServer := http.FileServer(http.Dir(localDir))
+		mux.Handle("/files/", http.StripPrefix("/files/", fileServer))
+	}
+
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
@@ -93,41 +151,70 @@ func main() {
 	log.Fatal(http.ListenAndServe(":"+port, mux))
 }
 
-func processJob(payload json.RawMessage) (json.RawMessage, error) {
-	var data map[string]any
-	if err := json.Unmarshal(payload, &data); err != nil {
+type jobProcessor struct {
+	httpClient  *http.Client
+	uploader    uploader.Uploader
+	limits      imageproc.Limits
+	jpegQuality int
+}
+
+func newJobProcessor(client *http.Client, uploader uploader.Uploader, limits imageproc.Limits, quality int) *jobProcessor {
+	return &jobProcessor{
+		httpClient:  client,
+		uploader:    uploader,
+		limits:      limits,
+		jpegQuality: quality,
+	}
+}
+
+func (p *jobProcessor) Process(ctx context.Context, jobID string, payload json.RawMessage) (json.RawMessage, error) {
+	var req api.ImageCropRequest
+	if err := json.Unmarshal(payload, &req); err != nil {
 		return nil, err
 	}
-
-	if raw, ok := data["delay_seconds"]; ok {
-		switch v := raw.(type) {
-		case float64:
-			if v > 0 {
-				time.Sleep(time.Duration(minFloat64(v, 30)) * time.Second)
-			}
-		case int:
-			if v > 0 {
-				time.Sleep(time.Duration(minFloat64(float64(v), 30)) * time.Second)
-			}
-		}
+	if req.ImageUrl == "" {
+		return nil, errors.New("imageUrl is required")
 	}
 
-	result, err := json.Marshal(map[string]any{
-		"ok":   true,
-		"echo": data,
+	data, _, err := netfetch.Download(ctx, p.httpClient, req.ImageUrl, netfetch.Options{
+		MaxBytes: p.limits.MaxBytes,
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	return result, nil
-}
-
-func minFloat64(a, b float64) float64 {
-	if a < b {
-		return a
+	img, err := imageproc.DecodeImage(data)
+	if err != nil {
+		return nil, err
 	}
-	return b
+	if err := imageproc.ValidateImage(img, p.limits.MaxPixels); err != nil {
+		return nil, err
+	}
+
+	cropped, err := imageproc.CropImage(img, imageproc.Crop{
+		X:      req.X,
+		Y:      req.Y,
+		Width:  req.Width,
+		Height: req.Height,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	jpegBytes, err := imageproc.EncodeJPEG(cropped, p.jpegQuality)
+	if err != nil {
+		return nil, err
+	}
+
+	objectName := fmt.Sprintf("crops/%s.jpg", jobID)
+	publicURL, err := p.uploader.Upload(ctx, objectName, jpegBytes, "image/jpeg")
+	if err != nil {
+		return nil, err
+	}
+
+	return json.Marshal(map[string]any{
+		"croppedImageUrl": publicURL,
+	})
 }
 
 type pubSubEnvelope struct {
@@ -154,3 +241,30 @@ func decodeJobID(envelope pubSubEnvelope) (string, error) {
 }
 
 var errMissingJobID = errors.New("jobId is required")
+
+func envInt64(key string, fallback int64) int64 {
+	if raw := os.Getenv(key); raw != "" {
+		if v, err := strconv.ParseInt(raw, 10, 64); err == nil {
+			return v
+		}
+	}
+	return fallback
+}
+
+func envInt(key string, fallback int) int {
+	if raw := os.Getenv(key); raw != "" {
+		if v, err := strconv.Atoi(raw); err == nil {
+			return v
+		}
+	}
+	return fallback
+}
+
+func envBool(key string, fallback bool) bool {
+	if raw := os.Getenv(key); raw != "" {
+		if v, err := strconv.ParseBool(raw); err == nil {
+			return v
+		}
+	}
+	return fallback
+}
