@@ -20,6 +20,12 @@ type Job struct {
 	UpdatedAt string
 }
 
+type OutboxMessage struct {
+	ID      string
+	JobID   string
+	Payload json.RawMessage
+}
+
 func Open(dsn string) (*sql.DB, error) {
 	// Open a MySQL connection pool for job storage.
 	db, err := sql.Open("mysql", dsn)
@@ -60,6 +66,55 @@ func InsertJob(db *sql.DB, payload json.RawMessage) (Job, error) {
 	}, nil
 }
 
+func InsertJobWithOutbox(db *sql.DB, payload json.RawMessage) (Job, OutboxMessage, error) {
+	createdAt := NowISO()
+	jobID := uuid.NewString()
+	outboxID := uuid.NewString()
+	outboxPayload, err := json.Marshal(map[string]string{"jobId": jobID})
+	if err != nil {
+		return Job{}, OutboxMessage{}, err
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return Job{}, OutboxMessage{}, err
+	}
+
+	if _, err := tx.Exec(
+		`INSERT INTO jobs (id, status, payload, result, error, created_at, updated_at)
+		 VALUES (?, ?, ?, NULL, NULL, ?, ?)`,
+		jobID, "pending", string(payload), createdAt, createdAt,
+	); err != nil {
+		_ = tx.Rollback()
+		return Job{}, OutboxMessage{}, err
+	}
+
+	if _, err := tx.Exec(
+		`INSERT INTO outbox (id, job_id, payload, published_at, attempts, last_error, created_at, updated_at)
+		 VALUES (?, ?, ?, NULL, 0, NULL, ?, ?)`,
+		outboxID, jobID, string(outboxPayload), createdAt, createdAt,
+	); err != nil {
+		_ = tx.Rollback()
+		return Job{}, OutboxMessage{}, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return Job{}, OutboxMessage{}, err
+	}
+
+	job := Job{
+		ID:        jobID,
+		Status:    "pending",
+		Payload:   payload,
+		Result:    nil,
+		Error:     sql.NullString{},
+		CreatedAt: createdAt,
+		UpdatedAt: createdAt,
+	}
+
+	return job, OutboxMessage{ID: outboxID, JobID: jobID, Payload: outboxPayload}, nil
+}
+
 func GetJob(db *sql.DB, jobID string) (Job, bool, error) {
 	// Fetch a job by ID; ok=false when not found.
 	var payload string
@@ -85,6 +140,111 @@ func GetJob(db *sql.DB, jobID string) (Job, bool, error) {
 	job.Error = errText
 
 	return job, true, nil
+}
+
+func ClaimOutboxBatch(ctx context.Context, db *sql.DB, limit int) ([]OutboxMessage, error) {
+	// Selecting unpublished rows while holding locks so other publishers skip them.
+	// Attempts are incremented inside the same transaction to record delivery tries.
+	// Unpublished rows are identified by published_at IS NULL.
+	if limit <= 0 {
+		return nil, nil
+	}
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := tx.QueryContext(
+		ctx,
+		`SELECT id, job_id, payload FROM outbox
+		 WHERE published_at IS NULL
+		 ORDER BY created_at
+		 LIMIT ?
+		 FOR UPDATE SKIP LOCKED`,
+		limit,
+	)
+	if err != nil {
+		_ = tx.Rollback()
+		return nil, err
+	}
+	defer rows.Close()
+
+	var messages []OutboxMessage
+	for rows.Next() {
+		var msg OutboxMessage
+		var payload string
+		if err := rows.Scan(&msg.ID, &msg.JobID, &payload); err != nil {
+			_ = tx.Rollback()
+			return nil, err
+		}
+		msg.Payload = json.RawMessage(payload)
+		messages = append(messages, msg)
+	}
+	if err := rows.Err(); err != nil {
+		_ = tx.Rollback()
+		return nil, err
+	}
+
+	for _, msg := range messages {
+		if _, err := tx.Exec(
+			`UPDATE outbox SET attempts = attempts + 1, updated_at = ? WHERE id = ?`,
+			NowISO(), msg.ID,
+		); err != nil {
+			_ = tx.Rollback()
+			return nil, err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	return messages, nil
+}
+
+func MarkOutboxPublished(db *sql.DB, outboxID string) error {
+	_, err := db.Exec(
+		`UPDATE outbox SET published_at = ?, last_error = NULL, updated_at = ? WHERE id = ?`,
+		NowISO(), NowISO(), outboxID,
+	)
+	return err
+}
+
+func RecordOutboxError(db *sql.DB, outboxID string, errMsg string) error {
+	_, err := db.Exec(
+		`UPDATE outbox SET last_error = ?, updated_at = ? WHERE id = ?`,
+		errMsg, NowISO(), outboxID,
+	)
+	return err
+}
+
+func StartJob(db *sql.DB, jobID string) (bool, error) {
+	// Start a pending job by transitioning it to in_progress if it is still pending.
+	tx, err := db.Begin()
+	if err != nil {
+		return false, err
+	}
+
+	result, err := tx.Exec(
+		`UPDATE jobs SET status = 'in_progress', updated_at = ? WHERE id = ? AND status = 'pending'`,
+		NowISO(), jobID,
+	)
+	if err != nil {
+		_ = tx.Rollback()
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		_ = tx.Rollback()
+		return false, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+
+	return affected == 1, nil
 }
 
 func ClaimJob(ctx context.Context, db *sql.DB) (Job, bool, error) {

@@ -3,8 +3,8 @@ Provide image processing service
 
 ## Overview
 This repo contains:
-- HTTP service that accepts jobs and stores them in a SQLite job database.
-- Worker process that claims pending jobs and executes them.
+- HTTP service that accepts jobs and stores them in a MySQL job database.
+- Worker process that consumes Pub/Sub push messages and executes jobs.
 
 ## Setup
 ```bash
@@ -18,6 +18,9 @@ which requires MySQL 8.0+.
 ## Run the API
 ```bash
 export JOB_DB_DSN='user:pass@tcp(127.0.0.1:3306)/image_api?parseTime=true'
+export GCP_PROJECT_ID='your-project-id'
+export PUBSUB_TOPIC='image-jobs'
+export PUBSUB_EMULATOR_HOST='127.0.0.1:8085'
 go run ./cmd/api
 ```
 
@@ -43,6 +46,7 @@ go run ./cmd/worker
 ```bash
 docker compose up --build
 ```
+This uses the Pub/Sub emulator; the publisher auto-creates the local topic and push subscription.
 
 Create a job:
 ```bash
@@ -53,7 +57,12 @@ curl -X POST http://127.0.0.1:8000/jobs/image-crop \
 
 ## Configuration
 - `JOB_DB_DSN`: MySQL DSN (required)
-- `JOB_POLL_INTERVAL`: worker polling interval in seconds (default `1.0`)
+- `GCP_PROJECT_ID`: GCP project ID for Pub/Sub (required for API)
+- `PUBSUB_TOPIC`: Pub/Sub topic name for job messages (required for API)
+- `PUBSUB_MODE`: set to `emulator` for local Pub/Sub emulator, `cloud` for production
+- `PUBSUB_EMULATOR_HOST`: set for local Pub/Sub emulator usage
+- `OUTBOX_POLL_INTERVAL`: outbox publisher poll interval in seconds (default `2`)
+- `OUTBOX_BATCH_SIZE`: outbox publisher batch size (default `10`)
 
 ## OpenAPI
 - Spec: `openapi.yaml`
@@ -69,6 +78,10 @@ Set these secrets in your repo:
 - `GCP_AR_REPO`
 - `CLOUDSQL_INSTANCE`
 - `JOB_DB_DSN`
+- `PUBSUB_PUSH_SERVICE_ACCOUNT`
+The workflow creates a Pub/Sub topic `image-jobs` and push subscription `image-jobs-push`.
+Ensure the Cloud Run service account running `image-api` has `roles/pubsub.publisher` on the topic.
+The Cloud Run service account running `image-publisher` also needs `roles/pubsub.publisher`.
 
 ## Migrations
 Run migrations locally and in production before starting services:

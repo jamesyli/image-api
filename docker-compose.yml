@@ -1,4 +1,17 @@
 services:
+  pubsub:
+    image: google/cloud-sdk:slim
+    platform: linux/amd64
+    command:
+      - /bin/sh
+      - -c
+      - |
+        apt-get update
+        apt-get install -y openjdk-17-jre-headless google-cloud-cli-pubsub-emulator
+        gcloud beta emulators pubsub start --host-port=0.0.0.0:8085
+    ports:
+      - "8085:8085"
+
   mysql:
     image: mysql:8.3
     environment:
@@ -13,10 +26,15 @@ services:
       retries: 10
 
   api:
-    build: .
-    command: ["/app/api"]
+    build:
+      context: .
+      dockerfile: Dockerfile.api
     environment:
       JOB_DB_DSN: root:pass@tcp(mysql:3306)/image_api?parseTime=true
+      GCP_PROJECT_ID: local-project
+      PUBSUB_TOPIC: image-jobs
+      PUBSUB_MODE: emulator
+      PUBSUB_EMULATOR_HOST: pubsub:8085
     ports:
       - "8000:8000"
     depends_on:
@@ -26,10 +44,31 @@ services:
         condition: service_completed_successfully
 
   worker:
-    build: .
-    command: ["/app/worker"]
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
     environment:
       JOB_DB_DSN: root:pass@tcp(mysql:3306)/image_api?parseTime=true
+    depends_on:
+      mysql:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  publisher:
+    build:
+      context: .
+      dockerfile: Dockerfile.publisher
+    environment:
+      JOB_DB_DSN: root:pass@tcp(mysql:3306)/image_api?parseTime=true
+      GCP_PROJECT_ID: local-project
+      PUBSUB_TOPIC: image-jobs
+      PUBSUB_SUBSCRIPTION: image-jobs-push
+      PUBSUB_PUSH_ENDPOINT: http://worker:8080/pubsub/jobs
+      PUBSUB_MODE: emulator
+      PUBSUB_EMULATOR_HOST: pubsub:8085
+      OUTBOX_POLL_INTERVAL: "2"
+      OUTBOX_BATCH_SIZE: "10"
     depends_on:
       mysql:
         condition: service_healthy
