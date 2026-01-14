@@ -169,8 +169,8 @@ func (s *server) PostJobsImageCrop(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, api.JobResponse{
 			Id:              mustParseUUID(job.ID),
 			Status:          job.Status,
-			CroppedImageUrl: nil,
-			Error:           nil,
+			CroppedImageUrl: extractCroppedImageURL(job.Result),
+			Error:           extractError(job.Error),
 			CreatedAt:       job.CreatedAt,
 			UpdatedAt:       job.UpdatedAt,
 		}, status)
