@@ -55,6 +55,11 @@ func (u *Uploader) Upload(ctx context.Context, objectName string, data []byte, c
 }
 
 func sanitizeObjectName(objectName string) (string, error) {
+	for _, part := range strings.Split(objectName, "/") {
+		if part == ".." {
+			return "", errors.New("invalid object name")
+		}
+	}
 	clean := path.Clean("/" + objectName)
 	clean = strings.TrimPrefix(clean, "/")
 	if clean == "" || clean == "." {

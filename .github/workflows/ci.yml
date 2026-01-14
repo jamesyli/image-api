@@ -20,6 +20,8 @@ jobs:
         run: test -z "$(gofmt -l cmd internal)"
       - name: Go vet
         run: go vet ./...
+      - name: Go test
+        run: go test ./...
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v6
         with:

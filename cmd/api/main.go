@@ -93,8 +93,11 @@ func main() {
 	if err := swagger.Validate(context.Background()); err != nil {
 		fatal("invalid openapi spec", "err", err)
 	}
-	router.Use(middleware.OapiRequestValidator(swagger))
-	api.HandlerFromMux(&server{db: db, publisher: publisher}, router)
+
+	apiRouter := chi.NewRouter()
+	apiRouter.Use(middleware.OapiRequestValidator(swagger))
+	api.HandlerFromMux(&server{db: db, publisher: publisher}, apiRouter)
+	router.Mount("/", apiRouter)
 
 	port := os.Getenv("PORT")
 	if port == "" {
