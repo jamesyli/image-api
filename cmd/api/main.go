@@ -1,25 +1,42 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"image-api/internal/api"
 	"image-api/internal/jobdb"
 
+	"cloud.google.com/go/pubsub"
 	"github.com/go-chi/chi/v5"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/google/uuid"
 	openapi_types "github.com/oapi-codegen/runtime/types"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 func main() {
 	dbDSN := os.Getenv("JOB_DB_DSN")
 	if dbDSN == "" {
 		log.Fatal("JOB_DB_DSN is required")
+	}
+	projectID := os.Getenv("GCP_PROJECT_ID")
+	if projectID == "" {
+		log.Fatal("GCP_PROJECT_ID is required")
+	}
+	topicName := os.Getenv("PUBSUB_TOPIC")
+	if topicName == "" {
+		log.Fatal("PUBSUB_TOPIC is required")
+	}
+	pubsubMode := os.Getenv("PUBSUB_MODE")
+	if pubsubMode == "" {
+		pubsubMode = "cloud"
 	}
 
 	db, err := jobdb.Open(dbDSN)
@@ -28,8 +45,23 @@ func main() {
 	}
 	defer db.Close()
 
+	pubsubClient, err := pubsub.NewClient(context.Background(), projectID)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer pubsubClient.Close()
+
+	publisher := pubsubClient.Topic(topicName)
+	defer publisher.Stop()
+
+	if pubsubMode == "emulator" {
+		if err := ensureTopic(context.Background(), pubsubClient, topicName); err != nil {
+			log.Fatal(err)
+		}
+	}
+
 	router := chi.NewRouter()
-	api.HandlerFromMux(&server{db: db}, router)
+	api.HandlerFromMux(&server{db: db, publisher: publisher}, router)
 
 	addr := ":8000"
 	log.Printf("api listening on %s", addr)
@@ -37,7 +69,8 @@ func main() {
 }
 
 type server struct {
-	db *sql.DB
+	db        *sql.DB
+	publisher *pubsub.Topic
 }
 
 func (s *server) PostJobsImageCrop(w http.ResponseWriter, r *http.Request) {
@@ -62,10 +95,14 @@ func (s *server) PostJobsImageCrop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	job, err := jobdb.InsertJob(s.db, payload)
+	job, outbox, err := jobdb.InsertJobWithOutbox(s.db, payload)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create job")
 		return
+	}
+
+	if err := s.publishJob(r.Context(), outbox.ID, outbox.Payload); err != nil {
+		log.Printf("publish failed for job %s: %v", job.ID, err)
 	}
 
 	writeJSON(w, api.JobResponse{
@@ -75,7 +112,7 @@ func (s *server) PostJobsImageCrop(w http.ResponseWriter, r *http.Request) {
 		Error:           nil,
 		CreatedAt:       job.CreatedAt,
 		UpdatedAt:       job.UpdatedAt,
-	}, http.StatusOK)
+	}, http.StatusCreated)
 }
 
 func (s *server) GetJobsId(w http.ResponseWriter, r *http.Request, id openapi_types.UUID) {
@@ -147,4 +184,33 @@ func mustParseUUID(id string) uuid.UUID {
 		return uuid.Nil
 	}
 	return parsed
+}
+
+func (s *server) publishJob(ctx context.Context, outboxID string, payload json.RawMessage) error {
+	// Publish the outbox payload to Pub/Sub and mark it published on success.
+	publishCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+
+	result := s.publisher.Publish(publishCtx, &pubsub.Message{Data: payload})
+	if _, err := result.Get(publishCtx); err != nil {
+		_ = jobdb.RecordOutboxError(s.db, outboxID, err.Error())
+		return err
+	}
+	return jobdb.MarkOutboxPublished(s.db, outboxID)
+}
+
+func ensureTopic(ctx context.Context, client *pubsub.Client, topicName string) error {
+	topic := client.Topic(topicName)
+	exists, err := topic.Exists(ctx)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return nil
+	}
+	_, err = client.CreateTopic(ctx, topicName)
+	if status.Code(err) == codes.AlreadyExists {
+		return nil
+	}
+	return err
 }

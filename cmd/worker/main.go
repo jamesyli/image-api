@@ -1,11 +1,12 @@
 package main
 
 import (
-	"context"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"log"
+	"net/http"
 	"os"
-	"strconv"
 	"time"
 
 	"image-api/internal/jobdb"
@@ -19,30 +20,51 @@ func main() {
 		log.Fatal("JOB_DB_DSN is required")
 	}
 
-	pollInterval := 1 * time.Second
-	if raw := os.Getenv("JOB_POLL_INTERVAL"); raw != "" {
-		if v, err := strconv.ParseFloat(raw, 64); err == nil {
-			pollInterval = time.Duration(v * float64(time.Second))
-		}
-	}
-
 	db, err := jobdb.Open(dbDSN)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer db.Close()
 
-	ctx := context.Background()
-	for {
-		job, ok, err := jobdb.ClaimJob(ctx, db)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/pubsub/jobs", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var envelope pubSubEnvelope
+		if err := json.NewDecoder(r.Body).Decode(&envelope); err != nil {
+			http.Error(w, "invalid json", http.StatusBadRequest)
+			return
+		}
+
+		jobID, err := decodeJobID(envelope)
 		if err != nil {
-			log.Printf("claim failed: %v", err)
-			time.Sleep(pollInterval)
-			continue
+			http.Error(w, "invalid message", http.StatusBadRequest)
+			return
+		}
+		log.Printf("received job message: %s", jobID)
+
+		claimed, err := jobdb.StartJob(db, jobID)
+		if err != nil {
+			http.Error(w, "failed to start job", http.StatusInternalServerError)
+			return
+		}
+		if !claimed {
+			log.Printf("job already claimed: %s", jobID)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		job, ok, err := jobdb.GetJob(db, jobID)
+		if err != nil {
+			http.Error(w, "failed to fetch job", http.StatusInternalServerError)
+			return
 		}
 		if !ok {
-			time.Sleep(pollInterval)
-			continue
+			http.Error(w, "job not found", http.StatusNotFound)
+			return
 		}
 
 		result, err := processJob(job.Payload)
@@ -50,13 +72,25 @@ func main() {
 			if err := jobdb.FailJob(db, job.ID, err.Error()); err != nil {
 				log.Printf("failed to mark job %s failed: %v", job.ID, err)
 			}
-			continue
+			http.Error(w, "job failed", http.StatusInternalServerError)
+			return
 		}
 
 		if err := jobdb.CompleteJob(db, job.ID, result); err != nil {
 			log.Printf("failed to mark job %s done: %v", job.ID, err)
+			http.Error(w, "job completion failed", http.StatusInternalServerError)
+			return
 		}
+
+		w.WriteHeader(http.StatusOK)
+	})
+
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
 	}
+	log.Printf("worker listening on :%s", port)
+	log.Fatal(http.ListenAndServe(":"+port, mux))
 }
 
 func processJob(payload json.RawMessage) (json.RawMessage, error) {
@@ -95,3 +129,28 @@ func minFloat64(a, b float64) float64 {
 	}
 	return b
 }
+
+type pubSubEnvelope struct {
+	Message struct {
+		Data string `json:"data"`
+	} `json:"message"`
+}
+
+func decodeJobID(envelope pubSubEnvelope) (string, error) {
+	raw, err := base64.StdEncoding.DecodeString(envelope.Message.Data)
+	if err != nil {
+		return "", err
+	}
+	var payload struct {
+		JobID string `json:"jobId"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return "", err
+	}
+	if payload.JobID == "" {
+		return "", errMissingJobID
+	}
+	return payload.JobID, nil
+}
+
+var errMissingJobID = errors.New("jobId is required")

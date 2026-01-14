@@ -1,0 +1,144 @@
+package main
+
+import (
+	"context"
+	"log"
+	"os"
+	"strconv"
+	"time"
+
+	"image-api/internal/jobdb"
+
+	"cloud.google.com/go/pubsub"
+	_ "github.com/go-sql-driver/mysql"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+)
+
+func main() {
+	dbDSN := os.Getenv("JOB_DB_DSN")
+	if dbDSN == "" {
+		log.Fatal("JOB_DB_DSN is required")
+	}
+	projectID := os.Getenv("GCP_PROJECT_ID")
+	if projectID == "" {
+		log.Fatal("GCP_PROJECT_ID is required")
+	}
+	topicName := os.Getenv("PUBSUB_TOPIC")
+	if topicName == "" {
+		log.Fatal("PUBSUB_TOPIC is required")
+	}
+	pubsubMode := os.Getenv("PUBSUB_MODE")
+	if pubsubMode == "" {
+		pubsubMode = "cloud"
+	}
+	subscriptionName := os.Getenv("PUBSUB_SUBSCRIPTION")
+	if subscriptionName == "" {
+		subscriptionName = "image-jobs-push"
+	}
+	pushEndpoint := os.Getenv("PUBSUB_PUSH_ENDPOINT")
+	if pushEndpoint == "" {
+		pushEndpoint = "http://worker:8080/pubsub/jobs"
+	}
+
+	pollInterval := 2 * time.Second
+	if raw := os.Getenv("OUTBOX_POLL_INTERVAL"); raw != "" {
+		if v, err := strconv.ParseFloat(raw, 64); err == nil {
+			pollInterval = time.Duration(v * float64(time.Second))
+		}
+	}
+	batchSize := 10
+	if raw := os.Getenv("OUTBOX_BATCH_SIZE"); raw != "" {
+		if v, err := strconv.Atoi(raw); err == nil && v > 0 {
+			batchSize = v
+		}
+	}
+
+	db, err := jobdb.Open(dbDSN)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db.Close()
+
+	pubsubClient, err := pubsub.NewClient(context.Background(), projectID)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer pubsubClient.Close()
+
+	publisher := pubsubClient.Topic(topicName)
+	defer publisher.Stop()
+
+	if pubsubMode == "emulator" {
+		if err := ensureTopic(context.Background(), pubsubClient, topicName); err != nil {
+			log.Fatal(err)
+		}
+		if err := ensureSubscription(context.Background(), pubsubClient, topicName, subscriptionName, pushEndpoint); err != nil {
+			log.Fatal(err)
+		}
+	}
+
+	ctx := context.Background()
+	for {
+		messages, err := jobdb.ClaimOutboxBatch(ctx, db, batchSize)
+		if err != nil {
+			log.Printf("outbox claim failed: %v", err)
+			time.Sleep(pollInterval)
+			continue
+		}
+		if len(messages) == 0 {
+			time.Sleep(pollInterval)
+			continue
+		}
+
+		for _, msg := range messages {
+			result := publisher.Publish(ctx, &pubsub.Message{Data: msg.Payload})
+			if _, err := result.Get(ctx); err != nil {
+				_ = jobdb.RecordOutboxError(db, msg.ID, err.Error())
+				continue
+			}
+			if err := jobdb.MarkOutboxPublished(db, msg.ID); err != nil {
+				log.Printf("mark published failed for outbox %s: %v", msg.ID, err)
+			}
+		}
+	}
+}
+
+func ensureTopic(ctx context.Context, client *pubsub.Client, topicName string) error {
+	topic := client.Topic(topicName)
+	exists, err := topic.Exists(ctx)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return nil
+	}
+	_, err = client.CreateTopic(ctx, topicName)
+	if status.Code(err) == codes.AlreadyExists {
+		return nil
+	}
+	return err
+}
+
+func ensureSubscription(ctx context.Context, client *pubsub.Client, topicName, subName, pushEndpoint string) error {
+	sub := client.Subscription(subName)
+	exists, err := sub.Exists(ctx)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return nil
+	}
+
+	topic := client.Topic(topicName)
+	_, err = client.CreateSubscription(ctx, subName, pubsub.SubscriptionConfig{
+		Topic: topic,
+		PushConfig: pubsub.PushConfig{
+			Endpoint: pushEndpoint,
+		},
+	})
+	if status.Code(err) == codes.AlreadyExists {
+		return nil
+	}
+	return err
+}
