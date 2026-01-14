@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"log"
+	"net/http"
 	"os"
 	"strconv"
 	"time"
@@ -79,29 +81,20 @@ func main() {
 	}
 
 	ctx := context.Background()
-	for {
-		messages, err := jobdb.ClaimOutboxBatch(ctx, db, batchSize)
-		if err != nil {
-			log.Printf("outbox claim failed: %v", err)
-			time.Sleep(pollInterval)
-			continue
-		}
-		if len(messages) == 0 {
-			time.Sleep(pollInterval)
-			continue
-		}
+	go runPublisherLoop(ctx, db, publisher, pollInterval, batchSize)
 
-		for _, msg := range messages {
-			result := publisher.Publish(ctx, &pubsub.Message{Data: msg.Payload})
-			if _, err := result.Get(ctx); err != nil {
-				_ = jobdb.RecordOutboxError(db, msg.ID, err.Error())
-				continue
-			}
-			if err := jobdb.MarkOutboxPublished(db, msg.ID); err != nil {
-				log.Printf("mark published failed for outbox %s: %v", msg.ID, err)
-			}
-		}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		// Health check endpoint for Cloud Run readiness.
+		w.WriteHeader(http.StatusOK)
+	})
+
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
 	}
+	log.Printf("publisher listening on :%s", port)
+	log.Fatal(http.ListenAndServe(":"+port, mux))
 }
 
 func ensureTopic(ctx context.Context, client *pubsub.Client, topicName string) error {
@@ -141,4 +134,30 @@ func ensureSubscription(ctx context.Context, client *pubsub.Client, topicName, s
 		return nil
 	}
 	return err
+}
+
+func runPublisherLoop(ctx context.Context, db *sql.DB, publisher *pubsub.Topic, pollInterval time.Duration, batchSize int) {
+	for {
+		messages, err := jobdb.ClaimOutboxBatch(ctx, db, batchSize)
+		if err != nil {
+			log.Printf("outbox claim failed: %v", err)
+			time.Sleep(pollInterval)
+			continue
+		}
+		if len(messages) == 0 {
+			time.Sleep(pollInterval)
+			continue
+		}
+
+		for _, msg := range messages {
+			result := publisher.Publish(ctx, &pubsub.Message{Data: msg.Payload})
+			if _, err := result.Get(ctx); err != nil {
+				_ = jobdb.RecordOutboxError(db, msg.ID, err.Error())
+				continue
+			}
+			if err := jobdb.MarkOutboxPublished(db, msg.ID); err != nil {
+				log.Printf("mark published failed for outbox %s: %v", msg.ID, err)
+			}
+		}
+	}
 }
