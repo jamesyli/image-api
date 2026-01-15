@@ -14,6 +14,7 @@ import (
 
 	"image-api/internal/api"
 	"image-api/internal/gcs"
+	"image-api/internal/health"
 	"image-api/internal/imageproc"
 	"image-api/internal/jobdb"
 	"image-api/internal/localstore"
@@ -82,20 +83,8 @@ func main() {
 	)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
-	})
-	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
-		checkCtx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
-		defer cancel()
-		if err := db.PingContext(checkCtx); err != nil {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			_, _ = w.Write([]byte("not ready"))
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
+	health.Register(mux, func(ctx context.Context) error {
+		return db.PingContext(ctx)
 	})
 	mux.HandleFunc("/pubsub/jobs", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -187,6 +176,7 @@ func newJobProcessor(client *http.Client, uploader uploader.Uploader, limits ima
 }
 
 func (p *jobProcessor) Process(ctx context.Context, jobID string, payload json.RawMessage) (json.RawMessage, error) {
+	// Download, crop, and upload the image, returning the result payload.
 	var req api.ImageCropRequest
 	if err := json.Unmarshal(payload, &req); err != nil {
 		return nil, err

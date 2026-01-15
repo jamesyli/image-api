@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"image-api/internal/api"
+	"image-api/internal/health"
 	"image-api/internal/jobdb"
 
 	"cloud.google.com/go/pubsub"
@@ -59,8 +60,8 @@ func main() {
 	}
 	defer pubsubClient.Close()
 
-	publisher := pubsubClient.Topic(topicName)
-	defer publisher.Stop()
+	topic := pubsubClient.Topic(topicName)
+	defer topic.Stop()
 
 	if pubsubMode == "emulator" {
 		if err := ensureTopicWithRetry(context.Background(), pubsubClient, topicName, 10, 500*time.Millisecond); err != nil {
@@ -69,19 +70,11 @@ func main() {
 	}
 
 	router := chi.NewRouter()
-	router.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
+	health.Register(router, func(ctx context.Context) error {
+		return checkAPIReady(ctx, db, topic)
 	})
-	router.Get("/readyz", func(w http.ResponseWriter, r *http.Request) {
-		if err := checkAPIReady(r.Context(), db, publisher); err != nil {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			_, _ = w.Write([]byte("not ready"))
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
-	})
+
+	// Load and validate the OpenAPI spec, then attach request validation middleware.
 	specPath := os.Getenv("OPENAPI_SPEC_PATH")
 	if specPath == "" {
 		specPath = "openapi.yaml"
@@ -96,7 +89,7 @@ func main() {
 
 	apiRouter := chi.NewRouter()
 	apiRouter.Use(middleware.OapiRequestValidator(swagger))
-	api.HandlerFromMux(&server{db: db, publisher: publisher}, apiRouter)
+	api.HandlerFromMux(&server{db: db, topic: topic}, apiRouter)
 	router.Mount("/", apiRouter)
 
 	port := os.Getenv("PORT")
@@ -111,8 +104,8 @@ func main() {
 }
 
 type server struct {
-	db        *sql.DB
-	publisher *pubsub.Topic
+	db    *sql.DB
+	topic *pubsub.Topic
 }
 
 func (s *server) PostJobsImageCrop(w http.ResponseWriter, r *http.Request) {
@@ -298,7 +291,7 @@ func (s *server) publishJob(ctx context.Context, outboxID string, payload json.R
 	publishCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 
-	result := s.publisher.Publish(publishCtx, &pubsub.Message{Data: payload})
+	result := s.topic.Publish(publishCtx, &pubsub.Message{Data: payload})
 	if _, err := result.Get(publishCtx); err != nil {
 		_ = jobdb.RecordOutboxError(s.db, outboxID, err.Error())
 		return err
@@ -307,6 +300,7 @@ func (s *server) publishJob(ctx context.Context, outboxID string, payload json.R
 }
 
 func ensureTopic(ctx context.Context, client *pubsub.Client, topicName string) error {
+	// Used only for Pub/Sub emulator startup in local/dev.
 	topic := client.Topic(topicName)
 	exists, err := topic.Exists(ctx)
 	if err != nil {
