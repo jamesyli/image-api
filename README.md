@@ -12,7 +12,7 @@ The codebase is organized around small, reusable packages:
 To add a new storage backend, implement the `Uploader` interface (e.g., S3 or Azure Blob) and wire it into the worker with an env switch. The download/crop/encode steps stay the same.
 
 ### System
-API accepts requests and returns job status, Publisher pushes outbox messages to Pub/Sub, and Worker processes jobs. Jobs and outbox entries are stored in MySQL so work survives crashes and retries.
+API accepts requests and returns job result, Publisher pushes outbox messages to Pub/Sub, and Worker processes jobs. Jobs and outbox entries are stored in MySQL so work survives crashes and retries.
 
 Availability and scalability come from stateless services that scale independently on Cloud Run, with Pub/Sub decoupling ingestion from processing.
 
@@ -30,14 +30,14 @@ Input image URLs are validated to allow only `http`/`https` scheme, redirects ar
 https://image-api-128408048796.us-south1.run.app
 ```
 
-Create a job:
+Create a job
 ```bash
 curl -X POST https://image-api-128408048796.us-south1.run.app/jobs/image-crop \
   -H 'content-type: application/json' \
   -d '{"imageUrl": "https://domain.com/image.jpg", "x": 100, "y": 50, "width": 200, "height": 200}'
 ```
 
-Check job status:
+Check job result
 ```bash
 curl https://image-api-128408048796.us-south1.run.app/jobs/{uuid}
 ```
@@ -60,7 +60,7 @@ docker compose up --build
 ```
 This uses the Pub/Sub emulator; the publisher auto-creates the local topic and push subscription.
 
-Create a job:
+Create a job
 ```bash
 curl -X POST http://127.0.0.1:8000/jobs/image-crop \
   -H 'content-type: application/json' \

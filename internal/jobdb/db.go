@@ -79,6 +79,7 @@ func InsertJob(db *sql.DB, payload json.RawMessage) (Job, error) {
 }
 
 func InsertJobWithOutbox(db *sql.DB, payload json.RawMessage) (Job, OutboxMessage, error) {
+	// Create a pending job and its outbox message in the same transaction.
 	createdAt := NowISO()
 	jobID := uuid.NewString()
 	outboxID := uuid.NewString()

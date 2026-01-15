@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"time"
 
+	"image-api/internal/health"
 	"image-api/internal/jobdb"
 
 	"cloud.google.com/go/pubsub"
@@ -18,6 +19,7 @@ import (
 )
 
 func main() {
+	// Publisher service: polls unpublished outbox rows and publishes jobs to Pub/Sub.
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, nil)))
 
 	dbDSN := os.Getenv("JOB_DB_DSN")
@@ -70,8 +72,8 @@ func main() {
 	}
 	defer pubsubClient.Close()
 
-	publisher := pubsubClient.Topic(topicName)
-	defer publisher.Stop()
+	topic := pubsubClient.Topic(topicName)
+	defer topic.Stop()
 
 	if pubsubMode == "emulator" {
 		if err := ensureTopicWithRetry(context.Background(), pubsubClient, topicName, 10, 500*time.Millisecond); err != nil {
@@ -83,23 +85,11 @@ func main() {
 	}
 
 	ctx := context.Background()
-	go runPublisherLoop(ctx, db, publisher, pollInterval, batchSize)
+	go runPublisherLoop(ctx, db, topic, pollInterval, batchSize)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		// Health check endpoint for Cloud Run readiness.
-		w.WriteHeader(http.StatusOK)
-	})
-	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
-		checkCtx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
-		defer cancel()
-		if err := db.PingContext(checkCtx); err != nil {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			_, _ = w.Write([]byte("not ready"))
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
+	health.Register(mux, func(ctx context.Context) error {
+		return db.PingContext(ctx)
 	})
 
 	port := os.Getenv("PORT")
@@ -112,7 +102,34 @@ func main() {
 	}
 }
 
+func runPublisherLoop(ctx context.Context, db *sql.DB, topic *pubsub.Topic, pollInterval time.Duration, batchSize int) {
+	for {
+		messages, err := jobdb.ClaimOutboxBatch(ctx, db, batchSize)
+		if err != nil {
+			slog.Error("outbox claim failed", "err", err)
+			time.Sleep(pollInterval)
+			continue
+		}
+		if len(messages) == 0 {
+			time.Sleep(pollInterval)
+			continue
+		}
+
+		for _, msg := range messages {
+			result := topic.Publish(ctx, &pubsub.Message{Data: msg.Payload})
+			if _, err := result.Get(ctx); err != nil {
+				_ = jobdb.RecordOutboxError(db, msg.ID, err.Error())
+				continue
+			}
+			if err := jobdb.MarkOutboxPublished(db, msg.ID); err != nil {
+				slog.Error("mark published failed for outbox", "outbox_id", msg.ID, "err", err)
+			}
+		}
+	}
+}
+
 func ensureTopic(ctx context.Context, client *pubsub.Client, topicName string) error {
+	// Used only for Pub/Sub emulator startup in local/dev.
 	topic := client.Topic(topicName)
 	exists, err := topic.Exists(ctx)
 	if err != nil {
@@ -142,6 +159,7 @@ func ensureTopicWithRetry(ctx context.Context, client *pubsub.Client, topicName 
 }
 
 func ensureSubscription(ctx context.Context, client *pubsub.Client, topicName, subName, pushEndpoint string) error {
+	// Used only for Pub/Sub emulator startup in local/dev.
 	sub := client.Subscription(subName)
 	exists, err := sub.Exists(ctx)
 	if err != nil {
@@ -162,32 +180,6 @@ func ensureSubscription(ctx context.Context, client *pubsub.Client, topicName, s
 		return nil
 	}
 	return err
-}
-
-func runPublisherLoop(ctx context.Context, db *sql.DB, publisher *pubsub.Topic, pollInterval time.Duration, batchSize int) {
-	for {
-		messages, err := jobdb.ClaimOutboxBatch(ctx, db, batchSize)
-		if err != nil {
-			slog.Error("outbox claim failed", "err", err)
-			time.Sleep(pollInterval)
-			continue
-		}
-		if len(messages) == 0 {
-			time.Sleep(pollInterval)
-			continue
-		}
-
-		for _, msg := range messages {
-			result := publisher.Publish(ctx, &pubsub.Message{Data: msg.Payload})
-			if _, err := result.Get(ctx); err != nil {
-				_ = jobdb.RecordOutboxError(db, msg.ID, err.Error())
-				continue
-			}
-			if err := jobdb.MarkOutboxPublished(db, msg.ID); err != nil {
-				slog.Error("mark published failed for outbox", "outbox_id", msg.ID, "err", err)
-			}
-		}
-	}
 }
 
 func fatal(msg string, attrs ...any) {
