@@ -19,21 +19,30 @@ type ErrorResponse struct {
 
 // ImageCropRequest defines model for ImageCropRequest.
 type ImageCropRequest struct {
-	Height   int    `json:"height"`
-	ImageUrl string `json:"imageUrl"`
-	Width    int    `json:"width"`
-	X        int    `json:"x"`
-	Y        int    `json:"y"`
+	Images []struct {
+		CropAreas []struct {
+			Height int `json:"height"`
+			Width  int `json:"width"`
+			X      int `json:"x"`
+			Y      int `json:"y"`
+		} `json:"cropAreas"`
+		ImageUrl string `json:"imageUrl"`
+	} `json:"images"`
 }
 
 // JobResponse defines model for JobResponse.
 type JobResponse struct {
-	CreatedAt       string             `json:"created_at"`
-	CroppedImageUrl *string            `json:"croppedImageUrl"`
-	Error           *string            `json:"error"`
-	Id              openapi_types.UUID `json:"id"`
-	Status          string             `json:"status"`
-	UpdatedAt       string             `json:"updated_at"`
+	CreatedAt        string             `json:"created_at"`
+	CroppedImageUrls *[]string          `json:"croppedImageUrls,omitempty"`
+	Error            *string            `json:"error"`
+	Id               openapi_types.UUID `json:"id"`
+	Status           string             `json:"status"`
+	UpdatedAt        string             `json:"updated_at"`
+}
+
+// PostJobsImageCropParams defines parameters for PostJobsImageCrop.
+type PostJobsImageCropParams struct {
+	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
 }
 
 // PostJobsImageCropJSONRequestBody defines body for PostJobsImageCrop for application/json ContentType.
@@ -43,7 +52,7 @@ type PostJobsImageCropJSONRequestBody = ImageCropRequest
 type ServerInterface interface {
 	// Create an image-crop job
 	// (POST /jobs/image-crop)
-	PostJobsImageCrop(w http.ResponseWriter, r *http.Request)
+	PostJobsImageCrop(w http.ResponseWriter, r *http.Request, params PostJobsImageCropParams)
 	// Get job status
 	// (GET /jobs/{id})
 	GetJobsId(w http.ResponseWriter, r *http.Request, id openapi_types.UUID)
@@ -55,7 +64,7 @@ type Unimplemented struct{}
 
 // Create an image-crop job
 // (POST /jobs/image-crop)
-func (_ Unimplemented) PostJobsImageCrop(w http.ResponseWriter, r *http.Request) {
+func (_ Unimplemented) PostJobsImageCrop(w http.ResponseWriter, r *http.Request, params PostJobsImageCropParams) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -78,8 +87,34 @@ type MiddlewareFunc func(http.Handler) http.Handler
 func (siw *ServerInterfaceWrapper) PostJobsImageCrop(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
+	var err error
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params PostJobsImageCropParams
+
+	headers := r.Header
+
+	// ------------- Optional header parameter "Idempotency-Key" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("Idempotency-Key")]; found {
+		var IdempotencyKey string
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "Idempotency-Key", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithLocation("simple", false, "Idempotency-Key", runtime.ParamLocationHeader, valueList[0], &IdempotencyKey)
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "Idempotency-Key", Err: err})
+			return
+		}
+
+		params.IdempotencyKey = &IdempotencyKey
+
+	}
+
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		siw.Handler.PostJobsImageCrop(w, r)
+		siw.Handler.PostJobsImageCrop(w, r, params)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {

@@ -61,28 +61,42 @@ components:
     ImageCropRequest:
       type: object
       required:
-        - imageUrl
-        - x
-        - y
-        - width
-        - height
+        - images
       properties:
-        imageUrl:
-          type: string
-          format: uri
-          minLength: 1
-        x:
-          type: integer
-          minimum: 0
-        y:
-          type: integer
-          minimum: 0
-        width:
-          type: integer
-          minimum: 0
-        height:
-          type: integer
-          minimum: 0
+        images:
+          type: array
+          items:
+            type: object
+            required:
+              - imageUrl
+              - cropAreas
+            properties:
+              imageUrl:
+                type: string
+                format: uri
+                minLength: 1
+              cropAreas:
+                type: array
+                items:
+                  type: object
+                  required:
+                    - x
+                    - y
+                    - width
+                    - height
+                  properties:
+                    x:
+                      type: integer
+                      minimum: 0
+                    y:
+                      type: integer
+                      minimum: 0
+                    width:
+                      type: integer
+                      minimum: 0
+                    height:
+                      type: integer
+                      minimum: 0
     JobResponse:
       type: object
       required:
@@ -91,21 +105,22 @@ components:
         - created_at
         - updated_at
       properties:
-        id:
-          type: string
-          format: uuid
-        status:
-          type: string
-        croppedImageUrl:
-          type: string
-          nullable: true
-        error:
-          type: string
-          nullable: true
-        created_at:
-          type: string
-        updated_at:
-          type: string
+          id:
+            type: string
+            format: uuid
+          status:
+            type: string
+          croppedImageUrls:
+            type: array
+            items:
+              type: string
+          error:
+            type: string
+            nullable: true
+          created_at:
+            type: string
+          updated_at:
+            type: string
     ErrorResponse:
       type: object
       required:

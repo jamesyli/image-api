@@ -181,48 +181,65 @@ func (p *jobProcessor) Process(ctx context.Context, jobID string, payload json.R
 	if err := json.Unmarshal(payload, &req); err != nil {
 		return nil, err
 	}
-	if req.ImageUrl == "" {
-		return nil, errors.New("imageUrl is required")
+	if len(req.Images) == 0 {
+		return nil, errors.New("at least one image is required")
 	}
 
-	data, _, err := netfetch.Download(ctx, p.httpClient, req.ImageUrl, netfetch.Options{
-		MaxBytes: p.limits.MaxBytes,
-	})
-	if err != nil {
-		return nil, err
+	var urls []string
+	for imageIdx, item := range req.Images {
+		if item.ImageUrl == "" {
+			return nil, errors.New("imageUrl is required")
+		}
+		if len(item.CropAreas) == 0 {
+			return nil, errors.New("cropAreas is required")
+		}
+
+		data, _, err := netfetch.Download(ctx, p.httpClient, item.ImageUrl, netfetch.Options{
+			MaxBytes: p.limits.MaxBytes,
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		img, err := imageproc.DecodeImage(data)
+		if err != nil {
+			return nil, err
+		}
+		if err := imageproc.ValidateImage(img, p.limits.MaxPixels); err != nil {
+			return nil, err
+		}
+
+		for cropIdx, area := range item.CropAreas {
+			cropped, err := imageproc.CropImage(img, imageproc.Crop{
+				X:      area.X,
+				Y:      area.Y,
+				Width:  area.Width,
+				Height: area.Height,
+			})
+			if err != nil {
+				return nil, err
+			}
+
+			jpegBytes, err := imageproc.EncodeJPEG(cropped, p.jpegQuality)
+			if err != nil {
+				return nil, err
+			}
+
+			objectName := fmt.Sprintf("crops/%s/%d_%d.jpg", jobID, imageIdx, cropIdx)
+			publicURL, err := p.uploader.Upload(ctx, objectName, jpegBytes, "image/jpeg")
+			if err != nil {
+				return nil, err
+			}
+			urls = append(urls, publicURL)
+		}
 	}
 
-	img, err := imageproc.DecodeImage(data)
-	if err != nil {
-		return nil, err
-	}
-	if err := imageproc.ValidateImage(img, p.limits.MaxPixels); err != nil {
-		return nil, err
-	}
-
-	cropped, err := imageproc.CropImage(img, imageproc.Crop{
-		X:      req.X,
-		Y:      req.Y,
-		Width:  req.Width,
-		Height: req.Height,
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	jpegBytes, err := imageproc.EncodeJPEG(cropped, p.jpegQuality)
-	if err != nil {
-		return nil, err
-	}
-
-	objectName := fmt.Sprintf("crops/%s.jpg", jobID)
-	publicURL, err := p.uploader.Upload(ctx, objectName, jpegBytes, "image/jpeg")
-	if err != nil {
-		return nil, err
+	if len(urls) == 0 {
+		return nil, errors.New("no cropped images generated")
 	}
 
 	return json.Marshal(map[string]any{
-		"croppedImageUrl": publicURL,
+		"croppedImageUrls": urls,
 	})
 }
 

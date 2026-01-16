@@ -108,7 +108,7 @@ type server struct {
 	topic *pubsub.Topic
 }
 
-func (s *server) PostJobsImageCrop(w http.ResponseWriter, r *http.Request) {
+func (s *server) PostJobsImageCrop(w http.ResponseWriter, r *http.Request, params api.PostJobsImageCropParams) {
 	// Validate and enqueue an image-crop job payload.
 	var req api.ImageCropRequest
 	body, err := io.ReadAll(r.Body)
@@ -120,13 +120,30 @@ func (s *server) PostJobsImageCrop(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid json")
 		return
 	}
-	if req.ImageUrl == "" {
-		writeError(w, http.StatusBadRequest, "imageUrl is required")
+
+	if len(req.Images) == 0 {
+		writeError(w, http.StatusBadRequest, "at least one image is required")
 		return
 	}
-	if req.Width <= 0 || req.Height <= 0 {
-		writeError(w, http.StatusBadRequest, "width and height must be greater than 0")
-		return
+	for _, item := range req.Images {
+		if item.ImageUrl == "" {
+			writeError(w, http.StatusBadRequest, "imageUrl is required")
+			return
+		}
+		if len(item.CropAreas) == 0 {
+			writeError(w, http.StatusBadRequest, "cropAreas is required")
+			return
+		}
+		for _, area := range item.CropAreas {
+			if area.Width <= 0 || area.Height <= 0 {
+				writeError(w, http.StatusBadRequest, "width and height must be greater than 0")
+				return
+			}
+			if area.X < 0 || area.Y < 0 {
+				writeError(w, http.StatusBadRequest, "x and y must be >= 0")
+				return
+			}
+		}
 	}
 
 	payload, err := json.Marshal(req)
@@ -135,8 +152,8 @@ func (s *server) PostJobsImageCrop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	idemKey := r.Header.Get("Idempotency-Key")
-	if idemKey != "" {
+	if params.IdempotencyKey != nil && *params.IdempotencyKey != "" {
+		idemKey := *params.IdempotencyKey
 		// Reuse the existing job when the same key+payload is retried.
 		hash := hashBody(body)
 		job, outbox, reused, err := jobdb.InsertJobWithOutboxAndIdempotency(s.db, payload, idemKey, hash)
@@ -159,14 +176,7 @@ func (s *server) PostJobsImageCrop(w http.ResponseWriter, r *http.Request) {
 			// Same idempotency key and payload: return the existing job instead of creating a new one.
 			status = http.StatusOK
 		}
-		writeJSON(w, api.JobResponse{
-			Id:              mustParseUUID(job.ID),
-			Status:          job.Status,
-			CroppedImageUrl: extractCroppedImageURL(job.Result),
-			Error:           extractError(job.Error),
-			CreatedAt:       job.CreatedAt,
-			UpdatedAt:       job.UpdatedAt,
-		}, status)
+		writeJSON(w, buildJobResponse(job), status)
 		return
 	}
 
@@ -180,14 +190,7 @@ func (s *server) PostJobsImageCrop(w http.ResponseWriter, r *http.Request) {
 		slog.Error("publish failed for job", "job_id", job.ID, "err", err)
 	}
 
-	writeJSON(w, api.JobResponse{
-		Id:              mustParseUUID(job.ID),
-		Status:          job.Status,
-		CroppedImageUrl: nil,
-		Error:           nil,
-		CreatedAt:       job.CreatedAt,
-		UpdatedAt:       job.UpdatedAt,
-	}, http.StatusCreated)
+	writeJSON(w, buildJobResponse(job), http.StatusCreated)
 }
 
 func loadOpenAPISpec(path string) (*openapi3.T, error) {
@@ -207,14 +210,7 @@ func (s *server) GetJobsId(w http.ResponseWriter, r *http.Request, id openapi_ty
 		return
 	}
 
-	writeJSON(w, api.JobResponse{
-		Id:              mustParseUUID(job.ID),
-		Status:          job.Status,
-		CroppedImageUrl: extractCroppedImageURL(job.Result),
-		Error:           extractError(job.Error),
-		CreatedAt:       job.CreatedAt,
-		UpdatedAt:       job.UpdatedAt,
-	}, http.StatusOK)
+	writeJSON(w, buildJobResponse(job), http.StatusOK)
 }
 
 func writeJSON(w http.ResponseWriter, v any, status int) {
@@ -227,8 +223,8 @@ func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, api.ErrorResponse{Message: message}, status)
 }
 
-func extractCroppedImageURL(result json.RawMessage) *string {
-	// Pull croppedImageUrl from the stored job result JSON.
+func extractCroppedImageURLs(result json.RawMessage) []string {
+	// Pull croppedImageUrls from the stored job result JSON.
 	if len(result) == 0 {
 		return nil
 	}
@@ -238,16 +234,29 @@ func extractCroppedImageURL(result json.RawMessage) *string {
 		return nil
 	}
 
-	raw, ok := payload["croppedImageUrl"]
-	if !ok {
-		return nil
-	}
-	url, ok := raw.(string)
-	if !ok || url == "" {
-		return nil
+	if rawList, ok := payload["croppedImageUrls"]; ok {
+		items, ok := rawList.([]any)
+		if !ok {
+			return nil
+		}
+		var urls []string
+		for _, item := range items {
+			if url, ok := item.(string); ok && url != "" {
+				urls = append(urls, url)
+			}
+		}
+		if len(urls) > 0 {
+			return urls
+		}
 	}
 
-	return &url
+	if raw, ok := payload["croppedImageUrl"]; ok {
+		if url, ok := raw.(string); ok && url != "" {
+			return []string{url}
+		}
+	}
+
+	return nil
 }
 
 func extractError(errText sql.NullString) *string {
@@ -264,6 +273,22 @@ func mustParseUUID(id string) uuid.UUID {
 		return uuid.Nil
 	}
 	return parsed
+}
+
+func buildJobResponse(job jobdb.Job) api.JobResponse {
+	urls := extractCroppedImageURLs(job.Result)
+	var urlsPtr *[]string
+	if len(urls) > 0 {
+		urlsPtr = &urls
+	}
+	return api.JobResponse{
+		Id:               mustParseUUID(job.ID),
+		Status:           job.Status,
+		CroppedImageUrls: urlsPtr,
+		Error:            extractError(job.Error),
+		CreatedAt:        job.CreatedAt,
+		UpdatedAt:        job.UpdatedAt,
+	}
 }
 
 func hashBody(body []byte) string {
